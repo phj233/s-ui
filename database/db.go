@@ -10,6 +10,7 @@ import (
 
 	"github.com/alireza0/s-ui/config"
 	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/util"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -25,11 +26,41 @@ func initUser() error {
 		return err
 	}
 	if count == 0 {
+		password, err := util.HashPassword("admin")
+		if err != nil {
+			return err
+		}
 		user := &model.User{
 			Username: "admin",
-			Password: "admin",
+			Password: password,
 		}
 		return db.Create(user).Error
+	}
+	return nil
+}
+
+func hashUserPasswords() error {
+	var users []model.User
+	err := db.Model(&model.User{}).Find(&users).Error
+	if err != nil {
+		return err
+	}
+
+	for _, user := range users {
+		if user.Password == "" || util.IsPasswordHash(user.Password) {
+			continue
+		}
+		password, err := util.HashPassword(user.Password)
+		if err != nil {
+			return err
+		}
+		err = db.Model(&model.User{}).
+			Where("id = ?", user.Id).
+			Update("password", password).
+			Error
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -116,6 +147,10 @@ func InitDB(dbPath string) error {
 		return err
 	}
 	err = initUser()
+	if err != nil {
+		return err
+	}
+	err = hashUserPasswords()
 	if err != nil {
 		return err
 	}

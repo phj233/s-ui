@@ -52,13 +52,15 @@ func showAdmin() {
 	userModel, err := userService.GetFirstUser()
 	if err != nil {
 		fmt.Println("get current user info failed,error info:", err)
+		return
 	}
 	username := userModel.Username
-	userpasswd := userModel.Password
-	if (username == "") || (userpasswd == "") {
+	if (username == "") || (userModel.Password == "") {
 		fmt.Println("current username or password is empty")
 	}
 	fmt.Println("First admin credentials:")
 	fmt.Println("\tUsername:\t", username)
-	fmt.Println("\tPassword:\t", userpasswd)
+	fmt.Println("\tPassword:\t", "<hidden>")
+	fmt.Println("Password is stored as a one-way hash and cannot be displayed.")
+	fmt.Println("Use `s-ui` to open the management menu, or `/usr/local/s-ui/sui admin -reset` to reset only the first admin credentials.")
 }

@@ -7,10 +7,26 @@ import (
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
+	"github.com/alireza0/s-ui/util"
 	"github.com/alireza0/s-ui/util/common"
 )
 
 type UserService struct {
+}
+
+func setUserCredentials(user *model.User, username string, password string) error {
+	if username == "" {
+		return common.NewError("username can not be empty")
+	} else if password == "" {
+		return common.NewError("password can not be empty")
+	}
+	passwordHash, err := util.HashPassword(password)
+	if err != nil {
+		return err
+	}
+	user.Username = username
+	user.Password = passwordHash
+	return nil
 }
 
 func (s *UserService) GetFirstUser() (*model.User, error) {
@@ -27,23 +43,20 @@ func (s *UserService) GetFirstUser() (*model.User, error) {
 }
 
 func (s *UserService) UpdateFirstUser(username string, password string) error {
-	if username == "" {
-		return common.NewError("username can not be empty")
-	} else if password == "" {
-		return common.NewError("password can not be empty")
-	}
 	db := database.GetDB()
 	user := &model.User{}
 	err := db.Model(model.User{}).First(user).Error
-	if database.IsNotFound(err) {
-		user.Username = username
-		user.Password = password
-		return db.Model(model.User{}).Create(user).Error
-	} else if err != nil {
+	notFound := database.IsNotFound(err)
+	if err != nil && !notFound {
 		return err
 	}
-	user.Username = username
-	user.Password = password
+	err = setUserCredentials(user, username, password)
+	if err != nil {
+		return err
+	}
+	if notFound {
+		return db.Model(model.User{}).Create(user).Error
+	}
 	return db.Save(user).Error
 }
 
@@ -60,7 +73,7 @@ func (s *UserService) CheckUser(username string, password string, remoteIP strin
 
 	user := &model.User{}
 	err := db.Model(model.User{}).
-		Where("username = ? and password = ?", username, password).
+		Where("username = ?", username).
 		First(user).
 		Error
 	if database.IsNotFound(err) {
@@ -68,6 +81,21 @@ func (s *UserService) CheckUser(username string, password string, remoteIP strin
 	} else if err != nil {
 		logger.Warning("check user err:", err, " IP: ", remoteIP)
 		return nil
+	}
+	if !util.PasswordMatches(user.Password, password) {
+		return nil
+	}
+
+	if !util.IsPasswordHash(user.Password) {
+		passwordHash, err := util.HashPassword(password)
+		if err == nil {
+			err = db.Model(model.User{}).
+				Where("id = ?", user.Id).
+				Update("password", passwordHash).Error
+		}
+		if err != nil {
+			logger.Warning("unable to upgrade password hash", err)
+		}
 	}
 
 	lastLoginTxt := time.Now().Format("2006-01-02 15:04:05") + " " + remoteIP
@@ -93,12 +121,17 @@ func (s *UserService) GetUsers() (*[]model.User, error) {
 func (s *UserService) ChangePass(id string, oldPass string, newUser string, newPass string) error {
 	db := database.GetDB()
 	user := &model.User{}
-	err := db.Model(model.User{}).Where("id = ? AND password = ?", id, oldPass).First(user).Error
+	err := db.Model(model.User{}).Where("id = ?", id).First(user).Error
 	if err != nil || database.IsNotFound(err) {
 		return err
 	}
-	user.Username = newUser
-	user.Password = newPass
+	if !util.PasswordMatches(user.Password, oldPass) {
+		return common.NewError("wrong user or password")
+	}
+	err = setUserCredentials(user, newUser, newPass)
+	if err != nil {
+		return err
+	}
 	return db.Save(user).Error
 }
 

@@ -37,7 +37,7 @@ func ParseCmd() {
 	settingCmd.IntVar(&subPort, "subPort", 0, "set sub port")
 	settingCmd.StringVar(&subPath, "subPath", "", "set sub path")
 
-	adminCmd.BoolVar(&show, "show", false, "show first admin credentials")
+	adminCmd.BoolVar(&show, "show", false, "show first admin username")
 	adminCmd.BoolVar(&reset, "reset", false, "reset first admin credentials")
 	adminCmd.StringVar(&username, "username", "", "set login username")
 	adminCmd.StringVar(&password, "password", "", "set login password")
@@ -47,7 +47,7 @@ func ParseCmd() {
 		oldUsage()
 		fmt.Println()
 		fmt.Println("Commands:")
-		fmt.Println("    admin          set/reset/show first admin credentials")
+		fmt.Println("    admin          set/reset/show first admin username")
 		fmt.Println("    uri            Show panel URI")
 		fmt.Println("    migrate        migrate form older version")
 		fmt.Println("    setting        set/reset/show settings")
