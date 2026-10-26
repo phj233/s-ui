@@ -850,7 +850,7 @@ func (s *NodeService) SyncSharedQuotas() error {
 func EncodeNodeClientSave(action string, id uint, client, remote model.Client, inboundIDs []uint, remark string) (url.Values, error) {
 	payload := map[string]interface{}{
 		"id": id, "enable": client.Enable, "name": client.Name,
-		"config": client.Config, "inbounds": inboundIDs, "volume": client.Volume,
+		"config": client.Config, "inbounds": inboundIDs, "links": []map[string]string{}, "volume": client.Volume,
 		"expiry": client.Expiry, "desc": client.Desc, "group": client.Group,
 		"remark": remark, "delayStart": false, "autoReset": false,
 		"resetDays": client.ResetDays, "up": remote.Up, "down": remote.Down,
