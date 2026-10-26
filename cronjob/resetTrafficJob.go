@@ -11,6 +11,7 @@ import (
 type ResetTrafficJob struct {
 	service.ClientService
 	service.InboundService
+	service.NodeService
 	service.SettingService
 }
 
@@ -67,6 +68,9 @@ func (s *ResetTrafficJob) Run() {
 	if err != nil {
 		logger.Warning("ResetTrafficJob: reset all clients failed: ", err)
 		return
+	}
+	if err := s.NodeService.ResetAllManagedTraffic(); err != nil {
+		logger.Warning("ResetTrafficJob: reset managed node traffic failed: ", err)
 	}
 
 	// Before the bookkeeping write: clients are re-enabled in the database but

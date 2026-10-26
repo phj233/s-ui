@@ -55,6 +55,9 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 	if err != nil {
 		return nil, nil, err
 	}
+	if err = j.LinkService.appendNodeSubscriptions(client); err != nil {
+		return nil, nil, err
+	}
 
 	outbounds, outTags, err := j.getOutbounds(client.Config, inDatas, client.Remark)
 	if err != nil {

@@ -30,6 +30,7 @@
 | Subscription Link (link/json/clash + info)| :heavy_check_mark: |
 | Dark/Light Theme                       | :heavy_check_mark: |
 | API Interface                          | :heavy_check_mark: |
+| Multi-Node Management                  | :heavy_check_mark: |
 
 ## Supported Platforms
 | Platform | Architecture | Status |
@@ -256,8 +257,17 @@ To run backend (from root folder of repository):
 - Clients’ traffic cap and expiration date
 - Displays online clients, inbounds and outbounds with traffic statistics, and system status monitoring
 - Subscription service with ability to add external links and subscription
+- Multi-node management across S-UI servers, with client synchronization and aggregated subscriptions
 - HTTPS for secure access to the web panel and subscription service (self-provided domain + SSL certificate)
 - Dark/Light theme
+
+### Multi-Node Management
+
+The panel host is always a local node. To add another region, install a compatible S-UI version on that server, create an API token there, then open **Multi-Region Nodes** in the central panel. Add the remote panel URL and token, test the connection, and choose the remote inbounds that should receive centrally managed clients.
+
+Enabled remote nodes receive centrally managed clients and are included in their subscriptions. A same-name client already on a remote panel is adopted and updated with the central credentials and selected inbounds; remote clients with other names are left alone. Removing a node first disables users managed by the central panel and leaves those accounts on the remote server.
+
+Traffic usage is summed across enabled nodes. The central panel reconciles shared quotas every 10 seconds, so a node outage or reporting delay can allow brief quota overage.
 
 ## Environment Variables
 

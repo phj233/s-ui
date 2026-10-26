@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/alireza0/s-ui/database/model"
 	"github.com/alireza0/s-ui/logger"
+	"github.com/alireza0/s-ui/service"
 	"github.com/alireza0/s-ui/util"
 )
 
@@ -16,6 +18,33 @@ type Link struct {
 }
 
 type LinkService struct {
+	service.NodeService
+}
+
+func (s *LinkService) appendNodeSubscriptions(client *model.Client) error {
+	s.NodeService.AggregateClientUsage(client)
+	urls, err := s.NodeService.RemoteSubscriptionURLs(client.Id, client.Name)
+	if err != nil {
+		return err
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	links := []Link{}
+	if len(client.Links) > 0 {
+		if err := json.Unmarshal(client.Links, &links); err != nil {
+			return err
+		}
+	}
+	for _, uri := range urls {
+		links = append(links, Link{Type: "sub", Uri: uri})
+	}
+	encoded, err := json.Marshal(links)
+	if err != nil {
+		return err
+	}
+	client.Links = encoded
+	return nil
 }
 
 func (s *LinkService) GetLinks(linkJson *json.RawMessage, types string, clientInfo string) []string {
