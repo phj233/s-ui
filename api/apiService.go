@@ -370,15 +370,7 @@ func (a *ApiService) Save(c *gin.Context, loginUser string) {
 	var objs []string
 	var err error
 	if obj == "nodes" {
-		rawNode := json.RawMessage(data)
-		var node struct {
-			APIURL string `json:"apiUrl"`
-		}
-		if act != "del" && json.Unmarshal(rawNode, &node) == nil && a.NodeService.IsLocalServer(node.APIURL, c.Request.Host) {
-			err = common.NewError("this panel's server is already included as the local node")
-		} else {
-			err = a.NodeService.Save(act, rawNode)
-		}
+		err = a.NodeService.Save(act, json.RawMessage(data), c.Request.Host)
 		objs = []string{"nodes"}
 	} else {
 		objs, err = a.ConfigService.Save(obj, act, json.RawMessage(data), initUsers, loginUser, hostname)

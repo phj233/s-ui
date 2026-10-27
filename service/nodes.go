@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,7 +52,7 @@ func (s *NodeService) GetAll() (*[]model.Node, error) {
 	return &nodes, err
 }
 
-func (s *NodeService) Save(act string, data json.RawMessage) error {
+func (s *NodeService) Save(act string, data json.RawMessage, requestHost string) error {
 	switch act {
 	case "new", "edit":
 		var node model.Node
@@ -67,6 +68,11 @@ func (s *NodeService) Save(act string, data json.RawMessage) error {
 			return err
 		}
 		node.APIURL = apiURL
+		remoteURL, _ := url.Parse(node.APIURL)
+		localURL, err := url.Parse("http://" + requestHost)
+		if err == nil && strings.EqualFold(remoteURL.Hostname(), localURL.Hostname()) {
+			return common.NewError("this panel's server is already included as the local node")
+		}
 		var duplicates int64
 		query := database.GetDB().Model(&model.Node{}).Where("api_url = ?", node.APIURL)
 		if node.Id > 0 {
@@ -95,7 +101,7 @@ func (s *NodeService) Save(act string, data json.RawMessage) error {
 				return common.NewError("invalid inbound tags: ", err)
 			}
 		}
-		if len(tags) == 0 && len(info.Inbounds) > 0 {
+		if len(tags) == 0 {
 			for _, inbound := range info.Inbounds {
 				tags = append(tags, inbound.Tag)
 			}
@@ -104,21 +110,20 @@ func (s *NodeService) Save(act string, data json.RawMessage) error {
 		for _, inbound := range info.Inbounds {
 			knownTags[inbound.Tag] = true
 		}
+		uniqueTags := make([]string, 0, len(tags))
+		seenTags := make(map[string]bool, len(tags))
 		for _, tag := range tags {
 			if !knownTags[tag] {
 				return common.NewErrorf("remote inbound %q does not exist", tag)
 			}
-		}
-		if node.Enabled && len(tags) == 0 {
-			return common.NewError("select at least one remote inbound")
-		}
-		uniqueTags := make([]string, 0, len(tags))
-		seenTags := make(map[string]bool, len(tags))
-		for _, tag := range tags {
-			if !seenTags[tag] {
-				seenTags[tag] = true
-				uniqueTags = append(uniqueTags, tag)
+			if seenTags[tag] {
+				continue
 			}
+			seenTags[tag] = true
+			uniqueTags = append(uniqueTags, tag)
+		}
+		if node.Enabled && len(uniqueTags) == 0 {
+			return common.NewError("select at least one remote inbound")
 		}
 		node.InboundTags, err = json.Marshal(uniqueTags)
 		if err != nil {
@@ -162,10 +167,7 @@ func (s *NodeService) Probe(apiURL, token string) (*RemoteNodeInfo, error) {
 	if err := callNodeAPI(base, token, http.MethodGet, "inbounds", nil, &inboundResult); err != nil {
 		return nil, err
 	}
-	var clientsResult struct {
-		Clients []model.Client `json:"clients"`
-	}
-	if err := callNodeAPI(base, token, http.MethodGet, "nodeClients", nil, &clientsResult); err != nil {
+	if err := callNodeAPI(base, token, http.MethodGet, "nodeClients", nil, nil); err != nil {
 		return nil, fmt.Errorf("remote S-UI does not support node synchronization: %w", err)
 	}
 	var loadResult struct {
@@ -189,18 +191,6 @@ func normalizeNodeURL(raw string) (string, error) {
 		parsed.Path = strings.TrimSuffix(parsed.Path, "/apiv2")
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
-}
-
-func (s *NodeService) IsLocalServer(apiURL, requestHost string) bool {
-	remote, err := url.Parse(apiURL)
-	if err != nil || remote.Hostname() == "" {
-		return false
-	}
-	local, err := url.Parse("http://" + requestHost)
-	if err != nil || local.Hostname() == "" {
-		return false
-	}
-	return strings.EqualFold(remote.Hostname(), local.Hostname())
 }
 
 func callNodeAPI(baseURL, token, method, action string, form url.Values, target interface{}) error {
@@ -240,7 +230,7 @@ func callNodeAPI(baseURL, token, method, action string, form url.Values, target 
 		}
 		return fmt.Errorf("node API %s: %s", action, result.Msg)
 	}
-	if target != nil && len(result.Obj) > 0 && string(result.Obj) != "null" {
+	if target != nil {
 		if err := json.Unmarshal(result.Obj, target); err != nil {
 			return fmt.Errorf("decode node API %s data: %w", action, err)
 		}
@@ -250,19 +240,13 @@ func callNodeAPI(baseURL, token, method, action string, form url.Values, target 
 
 func (s *NodeService) RemoteSubscriptionURLs(clientID uint, clientName string) ([]string, error) {
 	var nodes []model.Node
-	if err := database.GetDB().Where("enabled = ?", true).Order("id").Find(&nodes).Error; err != nil {
+	db := database.GetDB()
+	mappedNodes := db.Model(&model.NodeClient{}).Select("node_id").Where("client_id = ?", clientID)
+	if err := db.Where("enabled = ? AND id IN (?)", true, mappedNodes).Order("id").Find(&nodes).Error; err != nil {
 		return nil, err
 	}
 	urls := make([]string, 0, len(nodes))
 	for _, node := range nodes {
-		var mappings int64
-		if err := database.GetDB().Model(&model.NodeClient{}).
-			Where("node_id = ? AND client_id = ?", node.Id, clientID).Count(&mappings).Error; err != nil {
-			return nil, err
-		}
-		if mappings == 0 {
-			continue
-		}
 		base := strings.TrimSpace(node.SubURI)
 		if base == "" {
 			info, err := s.Probe(node.APIURL, node.Token)
@@ -294,20 +278,15 @@ func (s *NodeService) SyncAllClients() error {
 	}
 	var syncErrors []string
 	for _, node := range nodes {
+		var err error
 		if !node.Enabled {
-			if err := s.disableManagedClients(node); err != nil {
-				s.recordNodeStatus(node.Id, err)
-				syncErrors = append(syncErrors, node.Name+": "+err.Error())
-			} else {
-				s.recordNodeStatus(node.Id, nil)
-			}
-			continue
-		}
-		if err := s.syncNodeClients(node, clients); err != nil {
-			s.recordNodeStatus(node.Id, err)
-			syncErrors = append(syncErrors, node.Name+": "+err.Error())
+			err = s.disableManagedClients(node)
 		} else {
-			s.recordNodeStatus(node.Id, nil)
+			err = s.syncNodeClients(node, clients)
+		}
+		s.recordNodeStatus(node.Id, err)
+		if err != nil {
+			syncErrors = append(syncErrors, node.Name+": "+err.Error())
 		}
 	}
 	if len(syncErrors) > 0 {
@@ -328,7 +307,7 @@ func (s *NodeService) SyncAll() error {
 		failures = append(failures, err.Error())
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("%s", strings.Join(failures, "; "))
+		return errors.New(strings.Join(failures, "; "))
 	}
 	s.ClearNodeErrors()
 	return nil
@@ -350,10 +329,7 @@ func (s *NodeService) disableManagedClients(node model.Node) error {
 	if err != nil {
 		return err
 	}
-	remoteByID := make(map[uint]model.Client, len(remotes))
-	for _, remote := range remotes {
-		remoteByID[remote.Id] = remote
-	}
+	remoteByID := clientsByID(remotes)
 	quotas := make([]NodeQuota, 0, len(mappings))
 	for _, mapping := range mappings {
 		if remote, ok := remoteByID[mapping.RemoteClientId]; ok {
@@ -367,18 +343,23 @@ func (s *NodeService) disableManagedClients(node model.Node) error {
 	return callNodeAPI(node.APIURL, node.Token, http.MethodPost, "applyNodeQuotas", url.Values{"data": {string(encoded)}}, nil)
 }
 
+type nodeClientSync struct {
+	node       model.Node
+	inboundIDs []uint
+	byID       map[uint]model.Client
+	byName     map[string]model.Client
+}
+
 func (s *NodeService) syncNodeClients(node model.Node, clients []model.Client) error {
-	// Load the current remote client index once. /clients intentionally omits
-	// secrets and links but includes the IDs and usage fields needed here.
-	remoteClients, err := s.remoteClients(node)
+	remotes, err := s.remoteClients(node)
 	if err != nil {
 		return err
 	}
-	remoteByID := make(map[uint]model.Client, len(remoteClients))
-	remoteByName := make(map[string]model.Client, len(remoteClients))
-	for _, remote := range remoteClients {
-		remoteByID[remote.Id] = remote
-		remoteByName[remote.Name] = remote
+	sync := nodeClientSync{
+		node: node, byID: clientsByID(remotes), byName: make(map[string]model.Client, len(remotes)),
+	}
+	for _, remote := range remotes {
+		sync.byName[remote.Name] = remote
 	}
 	var inboundResponse struct {
 		Inbounds []RemoteInbound `json:"inbounds"`
@@ -393,19 +374,16 @@ func (s *NodeService) syncNodeClients(node model.Node, clients []model.Client) e
 	if len(tags) == 0 {
 		return fmt.Errorf("select at least one inbound")
 	}
-	var remoteInboundIDs []uint
+	inboundByTag := make(map[string]uint, len(inboundResponse.Inbounds))
+	for _, inbound := range inboundResponse.Inbounds {
+		inboundByTag[inbound.Tag] = inbound.Id
+	}
 	for _, tag := range tags {
-		found := false
-		for _, inbound := range inboundResponse.Inbounds {
-			if inbound.Tag == tag {
-				remoteInboundIDs = append(remoteInboundIDs, inbound.Id)
-				found = true
-				break
-			}
-		}
+		id, found := inboundByTag[tag]
 		if !found {
 			return fmt.Errorf("remote inbound %q no longer exists", tag)
 		}
+		sync.inboundIDs = append(sync.inboundIDs, id)
 	}
 	var mappings []model.NodeClient
 	if err := database.GetDB().Where("node_id = ?", node.Id).Find(&mappings).Error; err != nil {
@@ -418,74 +396,7 @@ func (s *NodeService) syncNodeClients(node model.Node, clients []model.Client) e
 	localIDs := make(map[uint]bool, len(clients))
 	for _, client := range clients {
 		localIDs[client.Id] = true
-		mapping, mapped := mappingByClient[client.Id]
-		remote, exists := remoteByID[mapping.RemoteClientId]
-		if !mapped || !exists {
-			if existing, collision := remoteByName[client.Name]; collision {
-				// A same-name client is adopted when the node is first enrolled.
-				// Its credentials and selected inbounds then become centrally managed.
-				remote, exists = existing, true
-			}
-		}
-		remoteID := uint(0)
-		act := "new"
-		if exists {
-			remoteID = remote.Id
-			act = "edit"
-		}
-		clientForNode := client
-		clientForNode.Enable = client.Enable && node.Enabled
-		remark := node.Name
-		if client.Remark != "" {
-			remark += "-" + client.Remark
-		}
-		form, err := EncodeNodeClientSave(act, remoteID, clientForNode, remote, remoteInboundIDs, remark)
-		if err != nil {
-			return err
-		}
-		var saveResult struct {
-			Clients []model.Client `json:"clients"`
-		}
-		if err := callNodeAPI(node.APIURL, node.Token, http.MethodPost, "save", form, &saveResult); err != nil {
-			return fmt.Errorf("sync client %q: %w", client.Name, err)
-		}
-		if remoteID == 0 {
-			for _, candidate := range saveResult.Clients {
-				if candidate.Name == client.Name {
-					remoteID = candidate.Id
-					remote = candidate
-					break
-				}
-			}
-			if remoteID == 0 {
-				remoteClients, err = s.remoteClients(node)
-				if err != nil {
-					return err
-				}
-				for _, candidate := range remoteClients {
-					if candidate.Name == client.Name {
-						remoteID = candidate.Id
-						remote = candidate
-						break
-					}
-				}
-				if remoteID == 0 {
-					return fmt.Errorf("remote panel did not return the new client %q", client.Name)
-				}
-			}
-		}
-		if err := database.GetDB().Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "node_id"}, {Name: "client_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"remote_client_id", "up", "down", "total_up", "total_down",
-				"central_total_up", "central_total_down", "central_up", "central_down", "central_next_reset", "updated_at",
-			}),
-		}).Create(&model.NodeClient{
-			NodeId: node.Id, ClientId: client.Id, RemoteClientId: remoteID,
-			Up: remote.Up, Down: remote.Down, TotalUp: remote.TotalUp, TotalDown: remote.TotalDown,
-			CentralTotalUp: client.TotalUp, CentralTotalDown: client.TotalDown,
-			CentralUp: client.Up, CentralDown: client.Down, CentralNextReset: client.NextReset, UpdatedAt: time.Now().Unix(),
-		}).Error; err != nil {
+		if err := sync.save(client, mappingByClient[client.Id]); err != nil {
 			return err
 		}
 	}
@@ -493,7 +404,7 @@ func (s *NodeService) syncNodeClients(node model.Node, clients []model.Client) e
 		if localIDs[mapping.ClientId] {
 			continue
 		}
-		if _, exists := remoteByID[mapping.RemoteClientId]; !exists {
+		if _, exists := sync.byID[mapping.RemoteClientId]; !exists {
 			if err := database.GetDB().Delete(&model.NodeClient{}, mapping.Id).Error; err != nil {
 				return err
 			}
@@ -512,6 +423,58 @@ func (s *NodeService) syncNodeClients(node model.Node, clients []model.Client) e
 	return nil
 }
 
+func (sync nodeClientSync) save(client model.Client, mapping model.NodeClient) error {
+	remote, exists := sync.byID[mapping.RemoteClientId]
+	if !exists {
+		// Adopt a same-name client when this node is first enrolled.
+		remote, exists = sync.byName[client.Name]
+	}
+	remoteID := uint(0)
+	act := "new"
+	if exists {
+		remoteID = remote.Id
+		act = "edit"
+	}
+	remark := sync.node.Name
+	if client.Remark != "" {
+		remark += "-" + client.Remark
+	}
+	form, err := encodeNodeClientSave(act, remoteID, client, remote, sync.inboundIDs, remark)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		Clients []model.Client `json:"clients"`
+	}
+	if err := callNodeAPI(sync.node.APIURL, sync.node.Token, http.MethodPost, "save", form, &result); err != nil {
+		return fmt.Errorf("sync client %q: %w", client.Name, err)
+	}
+	if remoteID == 0 {
+		for _, candidate := range result.Clients {
+			if candidate.Name == client.Name {
+				remoteID = candidate.Id
+				remote = candidate
+				break
+			}
+		}
+		if remoteID == 0 {
+			return fmt.Errorf("remote panel did not return the new client %q", client.Name)
+		}
+	}
+	return database.GetDB().Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "node_id"}, {Name: "client_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"remote_client_id", "up", "down", "total_up", "total_down",
+			"central_total_up", "central_total_down", "central_up", "central_down", "central_next_reset", "updated_at",
+		}),
+	}).Create(&model.NodeClient{
+		NodeId: sync.node.Id, ClientId: client.Id, RemoteClientId: remoteID,
+		Up: remote.Up, Down: remote.Down, TotalUp: remote.TotalUp, TotalDown: remote.TotalDown,
+		CentralTotalUp: client.TotalUp, CentralTotalDown: client.TotalDown,
+		CentralUp: client.Up, CentralDown: client.Down, CentralNextReset: client.NextReset, UpdatedAt: time.Now().Unix(),
+	}).Error
+}
+
 func (s *NodeService) remoteClients(node model.Node) ([]model.Client, error) {
 	var result struct {
 		Clients []model.Client `json:"clients"`
@@ -522,6 +485,14 @@ func (s *NodeService) remoteClients(node model.Node) ([]model.Client, error) {
 	return result.Clients, nil
 }
 
+func clientsByID(clients []model.Client) map[uint]model.Client {
+	byID := make(map[uint]model.Client, len(clients))
+	for _, client := range clients {
+		byID[client.Id] = client
+	}
+	return byID
+}
+
 func (s *NodeService) recordNodeStatus(id uint, err error) {
 	values := map[string]interface{}{"last_sync_at": time.Now().Unix()}
 	if err != nil {
@@ -529,16 +500,14 @@ func (s *NodeService) recordNodeStatus(id uint, err error) {
 	} else {
 		values["last_error"] = ""
 	}
-	if db := database.GetDB(); db != nil {
-		_ = db.Model(&model.Node{}).Where("id = ?", id).Updates(values).Error
-	}
+	_ = database.GetDB().Model(&model.Node{}).Where("id = ?", id).Updates(values).Error
 }
 
 // AggregateRemoteUsage adds each enabled node's latest traffic snapshot to the
 // local counters returned by the admin API. The database's local counters stay
 // separate so periodic resets and quota enforcement remain well-defined.
 func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) {
-	if clients == nil || len(*clients) == 0 {
+	if len(*clients) == 0 {
 		return
 	}
 	type usage struct {
@@ -568,9 +537,6 @@ func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) {
 }
 
 func (s *NodeService) AggregateClientUsage(client *model.Client) {
-	if client == nil {
-		return
-	}
 	var value struct {
 		Up        int64
 		Down      int64
@@ -598,10 +564,7 @@ func (s *NodeService) RefreshRemoteUsage() error {
 	if err := database.GetDB().Find(&clients).Error; err != nil {
 		return err
 	}
-	localByID := make(map[uint]model.Client, len(clients))
-	for _, client := range clients {
-		localByID[client.Id] = client
-	}
+	localByID := clientsByID(clients)
 	var failures []string
 	for _, node := range nodes {
 		if err := s.refreshNodeUsage(node, localByID); err != nil {
@@ -620,10 +583,7 @@ func (s *NodeService) refreshNodeUsage(node model.Node, localByID map[uint]model
 	if err != nil {
 		return err
 	}
-	remoteByID := make(map[uint]model.Client, len(remotes))
-	for _, client := range remotes {
-		remoteByID[client.Id] = client
-	}
+	remoteByID := clientsByID(remotes)
 	var mappings []model.NodeClient
 	if err := database.GetDB().Where("node_id = ?", node.Id).Find(&mappings).Error; err != nil {
 		return err
@@ -650,10 +610,7 @@ func (s *NodeService) refreshNodeUsage(node model.Node, localByID map[uint]model
 		if err != nil {
 			return err
 		}
-		remoteByID = make(map[uint]model.Client, len(remotes))
-		for _, client := range remotes {
-			remoteByID[client.Id] = client
-		}
+		remoteByID = clientsByID(remotes)
 		if err := database.GetDB().Where("node_id = ?", node.Id).Find(&mappings).Error; err != nil {
 			return err
 		}
@@ -679,10 +636,7 @@ func (s *NodeService) refreshNodeUsage(node model.Node, localByID map[uint]model
 		if err != nil {
 			return err
 		}
-		remoteByID = make(map[uint]model.Client, len(remotes))
-		for _, client := range remotes {
-			remoteByID[client.Id] = client
-		}
+		remoteByID = clientsByID(remotes)
 	}
 	usageChanged := false
 	for _, mapping := range mappings {
@@ -725,15 +679,15 @@ func (s *NodeService) ResetAllManagedTraffic() error {
 	if err := database.GetDB().Find(&clients).Error; err != nil {
 		return err
 	}
-	localByID := make(map[uint]model.Client, len(clients))
-	for _, client := range clients {
-		localByID[client.Id] = client
-	}
+	localByID := clientsByID(clients)
 	var failures []string
 	for _, node := range nodes {
 		var mappings []model.NodeClient
-		if err := database.GetDB().Select("remote_client_id").Where("node_id = ?", node.Id).Find(&mappings).Error; err != nil {
+		if err := database.GetDB().Where("node_id = ?", node.Id).Find(&mappings).Error; err != nil {
 			failures = append(failures, node.Name+": "+err.Error())
+			continue
+		}
+		if len(mappings) == 0 {
 			continue
 		}
 		ids := make([]uint, 0, len(mappings))
@@ -741,24 +695,22 @@ func (s *NodeService) ResetAllManagedTraffic() error {
 			ids = append(ids, mapping.RemoteClientId)
 		}
 		encoded, _ := json.Marshal(ids)
-		if len(ids) > 0 {
-			if err := callNodeAPI(node.APIURL, node.Token, http.MethodPost, "resetNodeClientTraffic", url.Values{"ids": {string(encoded)}}, nil); err != nil {
-				s.recordNodeStatus(node.Id, err)
-				failures = append(failures, node.Name+": "+err.Error())
+		if err := callNodeAPI(node.APIURL, node.Token, http.MethodPost, "resetNodeClientTraffic", url.Values{"ids": {string(encoded)}}, nil); err != nil {
+			s.recordNodeStatus(node.Id, err)
+			failures = append(failures, node.Name+": "+err.Error())
+			continue
+		}
+		for _, mapping := range mappings {
+			local, ok := localByID[mapping.ClientId]
+			if !ok {
 				continue
 			}
-			for _, mapping := range mappings {
-				local, ok := localByID[mapping.ClientId]
-				if !ok {
-					continue
-				}
-				if err := database.GetDB().Model(&model.NodeClient{}).Where("id = ?", mapping.Id).Updates(map[string]interface{}{
-					"central_total_up": local.TotalUp, "central_total_down": local.TotalDown,
-					"central_up": local.Up, "central_down": local.Down,
-					"central_next_reset": local.NextReset,
-				}).Error; err != nil {
-					failures = append(failures, node.Name+": update traffic reset marker: "+err.Error())
-				}
+			if err := database.GetDB().Model(&model.NodeClient{}).Where("id = ?", mapping.Id).Updates(map[string]interface{}{
+				"central_total_up": local.TotalUp, "central_total_down": local.TotalDown,
+				"central_up": local.Up, "central_down": local.Down,
+				"central_next_reset": local.NextReset,
+			}).Error; err != nil {
+				failures = append(failures, node.Name+": update traffic reset marker: "+err.Error())
 			}
 		}
 	}
@@ -788,17 +740,15 @@ func (s *NodeService) SyncSharedQuotas() error {
 	for _, node := range nodes {
 		nodeByID[node.Id] = node
 	}
-	localByID := make(map[uint]model.Client, len(clients))
+	localByID := clientsByID(clients)
 	remoteUsed := make(map[uint]int64, len(clients))
-	for _, client := range clients {
-		localByID[client.Id] = client
-	}
 	for _, mapping := range mappings {
 		if _, enabled := nodeByID[mapping.NodeId]; enabled {
 			remoteUsed[mapping.ClientId] += mapping.Up + mapping.Down
 		}
 	}
 	quotasByNode := make(map[uint][]NodeQuota, len(nodes))
+	now := time.Now().Unix()
 	for _, mapping := range mappings {
 		node, enabled := nodeByID[mapping.NodeId]
 		if !enabled {
@@ -811,7 +761,7 @@ func (s *NodeService) SyncSharedQuotas() error {
 		remaining := int64(0)
 		volume := int64(0)
 		used := client.Up + client.Down + remoteUsed[client.Id]
-		enabledForClient := client.Enable && (client.Expiry == 0 || client.Expiry > time.Now().Unix())
+		enabledForClient := client.Enable && (client.Expiry == 0 || client.Expiry > now)
 		if client.Volume > 0 {
 			remaining = client.Volume - used
 			if remaining < 0 {
@@ -845,9 +795,8 @@ func (s *NodeService) SyncSharedQuotas() error {
 	return nil
 }
 
-// EncodeNodeClientSave builds the form used by the remote S-UI save API. Kept
-// here so callers cannot accidentally send the panel's local user identity.
-func EncodeNodeClientSave(action string, id uint, client, remote model.Client, inboundIDs []uint, remark string) (url.Values, error) {
+// encodeNodeClientSave keeps the local client ID out of the remote save payload.
+func encodeNodeClientSave(action string, id uint, client, remote model.Client, inboundIDs []uint, remark string) (url.Values, error) {
 	payload := map[string]interface{}{
 		"id": id, "enable": client.Enable, "name": client.Name,
 		"config": client.Config, "inbounds": inboundIDs, "links": []map[string]string{}, "volume": client.Volume,
