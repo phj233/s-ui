@@ -12,6 +12,7 @@ import (
 
 	"github.com/alireza0/s-ui/database"
 	"github.com/alireza0/s-ui/database/model"
+	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/util/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -63,12 +64,11 @@ func (s *NodeService) Save(act string, data json.RawMessage, requestHost string)
 		if node.Name == "" {
 			return common.NewError("node name must not be empty")
 		}
-		apiURL, err := normalizeNodeURL(node.APIURL)
+		remoteURL, err := normalizeNodeURL(node.APIURL)
 		if err != nil {
 			return err
 		}
-		node.APIURL = apiURL
-		remoteURL, _ := url.Parse(node.APIURL)
+		node.APIURL = remoteURL.String()
 		localURL, err := url.Parse("http://" + requestHost)
 		if err == nil && strings.EqualFold(remoteURL.Hostname(), localURL.Hostname()) {
 			return common.NewError("this panel's server is already included as the local node")
@@ -164,25 +164,25 @@ func (s *NodeService) Probe(apiURL, token string) (*RemoteNodeInfo, error) {
 	var inboundResult struct {
 		Inbounds []RemoteInbound `json:"inbounds"`
 	}
-	if err := callNodeAPI(base, token, http.MethodGet, "inbounds", nil, &inboundResult); err != nil {
+	if err := callNodeAPI(base.String(), token, http.MethodGet, "inbounds", nil, &inboundResult); err != nil {
 		return nil, err
 	}
-	if err := callNodeAPI(base, token, http.MethodGet, "nodeClients", nil, nil); err != nil {
+	if err := callNodeAPI(base.String(), token, http.MethodGet, "nodeClients", nil, nil); err != nil {
 		return nil, fmt.Errorf("remote S-UI does not support node synchronization: %w", err)
 	}
 	var loadResult struct {
 		SubURI string `json:"subURI"`
 	}
-	if err := callNodeAPI(base, token, http.MethodGet, "load", nil, &loadResult); err != nil {
+	if err := callNodeAPI(base.String(), token, http.MethodGet, "load", nil, &loadResult); err != nil {
 		return nil, err
 	}
 	return &RemoteNodeInfo{SubURI: strings.TrimSpace(loadResult.SubURI), Inbounds: inboundResult.Inbounds}, nil
 }
 
-func normalizeNodeURL(raw string) (string, error) {
+func normalizeNodeURL(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", common.NewError("node URL must be an absolute http or https URL")
+		return nil, common.NewError("node URL must be an absolute http or https URL")
 	}
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
@@ -190,7 +190,7 @@ func normalizeNodeURL(raw string) (string, error) {
 	if strings.HasSuffix(parsed.Path, "/apiv2") {
 		parsed.Path = strings.TrimSuffix(parsed.Path, "/apiv2")
 	}
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return parsed, nil
 }
 
 func callNodeAPI(baseURL, token, method, action string, form url.Values, target interface{}) error {
@@ -198,8 +198,7 @@ func callNodeAPI(baseURL, token, method, action string, form url.Values, target 
 	if err != nil {
 		return err
 	}
-	base.Path = strings.TrimRight(base.Path, "/") + "/apiv2/" + strings.TrimLeft(action, "/")
-	base.RawQuery = ""
+	base.Path += "/apiv2/" + action
 	var body io.Reader
 	if form != nil {
 		body = strings.NewReader(form.Encode())
@@ -314,7 +313,9 @@ func (s *NodeService) SyncAll() error {
 }
 
 func (s *NodeService) ClearNodeErrors() {
-	_ = database.GetDB().Model(&model.Node{}).Where("last_error <> ''").Update("last_error", "").Error
+	if err := database.GetDB().Model(&model.Node{}).Where("last_error <> ''").Update("last_error", "").Error; err != nil {
+		logger.Warning("clear node sync errors failed: ", err)
+	}
 }
 
 func (s *NodeService) disableManagedClients(node model.Node) error {
@@ -439,10 +440,20 @@ func (sync nodeClientSync) save(client model.Client, mapping model.NodeClient) e
 	if client.Remark != "" {
 		remark += "-" + client.Remark
 	}
-	form, err := encodeNodeClientSave(act, remoteID, client, remote, sync.inboundIDs, remark)
+	// The local client ID must not be sent to the remote panel.
+	payload := map[string]interface{}{
+		"id": remoteID, "enable": client.Enable, "name": client.Name,
+		"config": client.Config, "inbounds": sync.inboundIDs, "links": []map[string]string{}, "volume": client.Volume,
+		"expiry": client.Expiry, "desc": client.Desc, "group": client.Group,
+		"remark": remark, "delayStart": false, "autoReset": false,
+		"resetDays": client.ResetDays, "up": remote.Up, "down": remote.Down,
+		"totalUp": remote.TotalUp, "totalDown": remote.TotalDown,
+	}
+	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
+	form := url.Values{"object": {"clients"}, "action": {act}, "data": {string(encoded)}}
 	var result struct {
 		Clients []model.Client `json:"clients"`
 	}
@@ -500,15 +511,17 @@ func (s *NodeService) recordNodeStatus(id uint, err error) {
 	} else {
 		values["last_error"] = ""
 	}
-	_ = database.GetDB().Model(&model.Node{}).Where("id = ?", id).Updates(values).Error
+	if updateErr := database.GetDB().Model(&model.Node{}).Where("id = ?", id).Updates(values).Error; updateErr != nil {
+		logger.Warning("update node sync status failed: ", updateErr)
+	}
 }
 
 // AggregateRemoteUsage adds each enabled node's latest traffic snapshot to the
 // local counters returned by the admin API. The database's local counters stay
 // separate so periodic resets and quota enforcement remain well-defined.
-func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) {
+func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) error {
 	if len(*clients) == 0 {
-		return
+		return nil
 	}
 	type usage struct {
 		ClientId  uint
@@ -518,10 +531,12 @@ func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) {
 		TotalDown int64
 	}
 	var usages []usage
-	_ = database.GetDB().Raw(`SELECT nc.client_id, SUM(nc.up) AS up, SUM(nc.down) AS down,
+	if err := database.GetDB().Raw(`SELECT nc.client_id, SUM(nc.up) AS up, SUM(nc.down) AS down,
 		SUM(nc.total_up) AS total_up, SUM(nc.total_down) AS total_down
 		FROM node_clients nc JOIN nodes n ON n.id = nc.node_id
-		WHERE n.enabled = ? GROUP BY nc.client_id`, true).Scan(&usages).Error
+		WHERE n.enabled = ? GROUP BY nc.client_id`, true).Scan(&usages).Error; err != nil {
+		return err
+	}
 	byClient := make(map[uint]usage, len(usages))
 	for _, value := range usages {
 		byClient[value.ClientId] = value
@@ -534,23 +549,27 @@ func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) {
 			(*clients)[i].TotalDown += value.TotalDown
 		}
 	}
+	return nil
 }
 
-func (s *NodeService) AggregateClientUsage(client *model.Client) {
+func (s *NodeService) AggregateClientUsage(client *model.Client) error {
 	var value struct {
 		Up        int64
 		Down      int64
 		TotalUp   int64
 		TotalDown int64
 	}
-	_ = database.GetDB().Raw(`SELECT SUM(nc.up) AS up, SUM(nc.down) AS down,
+	if err := database.GetDB().Raw(`SELECT SUM(nc.up) AS up, SUM(nc.down) AS down,
 		SUM(nc.total_up) AS total_up, SUM(nc.total_down) AS total_down
 		FROM node_clients nc JOIN nodes n ON n.id = nc.node_id
-		WHERE nc.client_id = ? AND n.enabled = ?`, client.Id, true).Scan(&value).Error
+		WHERE nc.client_id = ? AND n.enabled = ?`, client.Id, true).Scan(&value).Error; err != nil {
+		return err
+	}
 	client.Up += value.Up
 	client.Down += value.Down
 	client.TotalUp += value.TotalUp
 	client.TotalDown += value.TotalDown
+	return nil
 }
 
 // RefreshRemoteUsage polls each registered S-UI node, updates its managed user
@@ -793,21 +812,4 @@ func (s *NodeService) SyncSharedQuotas() error {
 		return fmt.Errorf("shared quota sync failed: %s", strings.Join(failures, "; "))
 	}
 	return nil
-}
-
-// encodeNodeClientSave keeps the local client ID out of the remote save payload.
-func encodeNodeClientSave(action string, id uint, client, remote model.Client, inboundIDs []uint, remark string) (url.Values, error) {
-	payload := map[string]interface{}{
-		"id": id, "enable": client.Enable, "name": client.Name,
-		"config": client.Config, "inbounds": inboundIDs, "links": []map[string]string{}, "volume": client.Volume,
-		"expiry": client.Expiry, "desc": client.Desc, "group": client.Group,
-		"remark": remark, "delayStart": false, "autoReset": false,
-		"resetDays": client.ResetDays, "up": remote.Up, "down": remote.Down,
-		"totalUp": remote.TotalUp, "totalDown": remote.TotalDown,
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	return url.Values{"object": {"clients"}, "action": {action}, "data": {string(encoded)}}, nil
 }

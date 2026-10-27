@@ -80,7 +80,9 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		if err != nil {
 			return "", err
 		}
-		a.NodeService.AggregateRemoteUsage(clients)
+		if err := a.NodeService.AggregateRemoteUsage(clients); err != nil {
+			return "", err
+		}
 		tlsConfigs, err := a.TlsService.GetAll()
 		if err != nil {
 			return "", err
@@ -168,7 +170,9 @@ func (a *ApiService) LoadPartialData(c *gin.Context, objs []string) error {
 			if err != nil {
 				return err
 			}
-			a.NodeService.AggregateRemoteUsage(clients)
+			if err := a.NodeService.AggregateRemoteUsage(clients); err != nil {
+				return err
+			}
 			data[obj] = clients
 		case "config":
 			config, err := a.SettingService.GetConfig()

@@ -22,7 +22,9 @@ type LinkService struct {
 }
 
 func (s *LinkService) appendNodeSubscriptions(client *model.Client) error {
-	s.NodeService.AggregateClientUsage(client)
+	if err := s.NodeService.AggregateClientUsage(client); err != nil {
+		return err
+	}
 	urls, err := s.NodeService.RemoteSubscriptionURLs(client.Id, client.Name)
 	if err != nil {
 		return err
@@ -30,12 +32,19 @@ func (s *LinkService) appendNodeSubscriptions(client *model.Client) error {
 	if len(urls) == 0 {
 		return nil
 	}
-	var links []Link
-	_ = json.Unmarshal(client.Links, &links)
+	links := []Link{}
+	if len(client.Links) > 0 {
+		if err := json.Unmarshal(client.Links, &links); err != nil {
+			return err
+		}
+	}
 	for _, uri := range urls {
 		links = append(links, Link{Type: "sub", Uri: uri})
 	}
-	encoded, _ := json.Marshal(links)
+	encoded, err := json.Marshal(links)
+	if err != nil {
+		return err
+	}
 	client.Links = encoded
 	return nil
 }
