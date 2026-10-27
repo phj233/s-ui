@@ -48,6 +48,14 @@ func (a *APIv2Handler) postHandler(c *gin.Context) {
 	switch action {
 	case "save":
 		a.ApiService.Save(c, username)
+	case "probeNode":
+		a.ApiService.ProbeNode(c)
+	case "syncNodes":
+		a.ApiService.SyncNodes(c)
+	case "applyNodeQuotas":
+		a.ApiService.ApplyNodeQuotas(c)
+	case "resetNodeClientTraffic":
+		a.ApiService.ResetNodeClientTraffic(c)
 	case "restartApp":
 		a.ApiService.RestartApp(c)
 	case "restartSb":
@@ -77,7 +85,9 @@ func (a *APIv2Handler) getHandler(c *gin.Context) {
 	switch action {
 	case "load":
 		a.ApiService.LoadData(c)
-	case "inbounds", "outbounds", "endpoints", "services", "tls", "clients", "config":
+	case "nodeClients":
+		a.ApiService.GetNodeClients(c)
+	case "inbounds", "outbounds", "endpoints", "services", "tls", "clients", "config", "nodes":
 		err := a.ApiService.LoadPartialData(c, []string{action})
 		if err != nil {
 			jsonMsg(c, action, err)

@@ -25,6 +25,7 @@ type ApiService struct {
 	service.OutboundService
 	service.EndpointService
 	service.ServicesService
+	service.NodeService
 	service.PanelService
 	service.StatsService
 	service.ServerService
@@ -77,6 +78,9 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		}
 		clients, err := a.ClientService.GetAll()
 		if err != nil {
+			return "", err
+		}
+		if err := a.NodeService.AggregateRemoteUsage(clients); err != nil {
 			return "", err
 		}
 		tlsConfigs, err := a.TlsService.GetAll()
@@ -166,6 +170,9 @@ func (a *ApiService) LoadPartialData(c *gin.Context, objs []string) error {
 			if err != nil {
 				return err
 			}
+			if err := a.NodeService.AggregateRemoteUsage(clients); err != nil {
+				return err
+			}
 			data[obj] = clients
 		case "config":
 			config, err := a.SettingService.GetConfig()
@@ -173,6 +180,12 @@ func (a *ApiService) LoadPartialData(c *gin.Context, objs []string) error {
 				return err
 			}
 			data[obj] = json.RawMessage(config)
+		case "nodes":
+			nodes, err := a.NodeService.GetAll()
+			if err != nil {
+				return err
+			}
+			data[obj] = nodes
 		case "settings":
 			settings, err := a.SettingService.GetAllSetting()
 			if err != nil {
@@ -358,15 +371,68 @@ func (a *ApiService) Save(c *gin.Context, loginUser string) {
 	act := c.Request.FormValue("action")
 	data := c.Request.FormValue("data")
 	initUsers := c.Request.FormValue("initUsers")
-	objs, err := a.ConfigService.Save(obj, act, json.RawMessage(data), initUsers, loginUser, hostname)
+	var objs []string
+	var err error
+	if obj == "nodes" {
+		err = a.NodeService.Save(act, json.RawMessage(data), c.Request.Host)
+		objs = []string{"nodes"}
+	} else {
+		objs, err = a.ConfigService.Save(obj, act, json.RawMessage(data), initUsers, loginUser, hostname)
+	}
 	if err != nil {
 		jsonMsg(c, "save", err)
 		return
+	}
+	if obj == "nodes" || obj == "clients" {
+		if syncErr := a.NodeService.SyncAll(); syncErr != nil {
+			logger.Warning("remote node client sync failed after ", obj, " save: ", syncErr)
+		}
 	}
 	err = a.LoadPartialData(c, objs)
 	if err != nil {
 		jsonMsg(c, obj, err)
 	}
+}
+
+// ProbeNode checks a remote panel and returns its available inbounds.
+func (a *ApiService) ProbeNode(c *gin.Context) {
+	info, err := a.NodeService.Probe(c.Request.FormValue("apiUrl"), c.Request.FormValue("token"))
+	jsonObj(c, info, err)
+}
+
+// SyncNodes reconciles remote clients, traffic, and shared quotas on demand.
+func (a *ApiService) SyncNodes(c *gin.Context) {
+	jsonMsg(c, "syncNodes", a.NodeService.SyncAll())
+}
+
+// GetNodeClients exposes local clients to the managing panel for synchronization.
+func (a *ApiService) GetNodeClients(c *gin.Context) {
+	clients, err := a.ClientService.GetAll()
+	jsonObj(c, map[string]interface{}{"clients": clients}, err)
+}
+
+// ApplyNodeQuotas applies central quota and enable state to remote clients.
+func (a *ApiService) ApplyNodeQuotas(c *gin.Context) {
+	var quotas []service.NodeQuota
+	if err := json.Unmarshal([]byte(c.Request.FormValue("data")), &quotas); err != nil {
+		jsonMsg(c, "applyNodeQuotas", err)
+		return
+	}
+	inboundIDs, err := a.ClientService.ApplyNodeQuotas(quotas)
+	if err == nil && len(inboundIDs) > 0 {
+		err = a.InboundService.UpdateInboundsUsers(database.GetDB(), inboundIDs)
+	}
+	jsonMsg(c, "applyNodeQuotas", err)
+}
+
+// ResetNodeClientTraffic clears selected remote counters after a central reset.
+func (a *ApiService) ResetNodeClientTraffic(c *gin.Context) {
+	var ids []uint
+	if err := json.Unmarshal([]byte(c.Request.FormValue("ids")), &ids); err != nil {
+		jsonMsg(c, "resetNodeClientTraffic", err)
+		return
+	}
+	jsonMsg(c, "resetNodeClientTraffic", a.ClientService.ResetNodeClientTraffic(ids))
 }
 
 func (a *ApiService) RestartApp(c *gin.Context) {
@@ -400,6 +466,9 @@ func (a *ApiService) ResetTraffic(c *gin.Context) {
 	}
 	if len(inboundIds) > 0 {
 		err = a.InboundService.UpdateInboundsUsers(database.GetDB(), inboundIds)
+	}
+	if nodeErr := a.NodeService.ResetAllManagedTraffic(); nodeErr != nil {
+		logger.Warning("reset managed node traffic failed: ", nodeErr)
 	}
 	jsonMsg(c, "resetTraffic", err)
 }

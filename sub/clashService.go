@@ -77,6 +77,9 @@ func (s *ClashService) GetClash(subId string) (*string, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if err = s.LinkService.appendNodeSubscriptions(client); err != nil {
+		return nil, nil, err
+	}
 
 	outbounds, outTags, err := s.getOutbounds(client.Config, inDatas, client.Remark)
 	if err != nil {

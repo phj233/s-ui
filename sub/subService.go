@@ -24,6 +24,9 @@ func (s *SubService) GetSubs(subId string) (*string, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if err = s.LinkService.appendNodeSubscriptions(client); err != nil {
+		return nil, nil, err
+	}
 
 	clientInfo := ""
 	subShowInfo, _ := s.SettingService.GetSubShowInfo()
