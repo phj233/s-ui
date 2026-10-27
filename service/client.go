@@ -17,6 +17,12 @@ import (
 
 type ClientService struct{}
 
+const remoteTrafficSQL = "COALESCE((SELECT SUM(nc.up + nc.down) FROM node_clients nc " +
+	"JOIN nodes n ON n.id = nc.node_id WHERE nc.client_id = clients.id AND n.enabled = true), 0)"
+const clientTrafficSQL = "up + down + " + remoteTrafficSQL
+const depletedClientsSQL = "enable = true AND ((volume > 0 AND " + clientTrafficSQL +
+	" > volume) OR (expiry > 0 AND expiry < ?))"
+
 func (s *ClientService) Get(id string) (*[]model.Client, error) {
 	if id == "" {
 		return s.GetAll()
@@ -503,7 +509,7 @@ func (s *ClientService) DepleteClients() ([]uint, error) {
 	}
 
 	// Deplete clients
-	err = tx.Model(model.Client{}).Where("enable = true AND ((volume > 0 AND up + down + COALESCE((SELECT SUM(nc.up + nc.down) FROM node_clients nc JOIN nodes n ON n.id = nc.node_id WHERE nc.client_id = clients.id AND n.enabled = true), 0) > volume) OR (expiry > 0 AND expiry < ?))", dt).Scan(&clients).Error
+	err = tx.Model(model.Client{}).Where(depletedClientsSQL, dt).Scan(&clients).Error
 	if err != nil {
 		return nil, err
 	}
@@ -526,7 +532,7 @@ func (s *ClientService) DepleteClients() ([]uint, error) {
 
 	// Save changes
 	if len(changes) > 0 {
-		err = tx.Model(model.Client{}).Where("enable = true AND ((volume > 0 AND up + down + COALESCE((SELECT SUM(nc.up + nc.down) FROM node_clients nc JOIN nodes n ON n.id = nc.node_id WHERE nc.client_id = clients.id AND n.enabled = true), 0) > volume) OR (expiry > 0 AND expiry < ?))", dt).Update("enable", false).Error
+		err = tx.Model(model.Client{}).Where(depletedClientsSQL, dt).Update("enable", false).Error
 		if err != nil {
 			return nil, err
 		}
@@ -547,7 +553,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 	var inboundIds []uint
 	// Set delay start without periodic reset
 	err = tx.Model(model.Client{}).
-		Where("enable = true AND delay_start = true AND auto_reset = false AND (up + down + COALESCE((SELECT SUM(nc.up + nc.down) FROM node_clients nc JOIN nodes n ON n.id = nc.node_id WHERE nc.client_id = clients.id AND n.enabled = true), 0)) > 0").Find(&resetClients).Error
+		Where("enable = true AND delay_start = true AND auto_reset = false AND (" + clientTrafficSQL + ") > 0").Find(&resetClients).Error
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +572,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 
 	// Set delay start with periodic reset
 	err = tx.Model(model.Client{}).
-		Where("enable = true AND delay_start = true AND auto_reset = true AND (up + down + COALESCE((SELECT SUM(nc.up + nc.down) FROM node_clients nc JOIN nodes n ON n.id = nc.node_id WHERE nc.client_id = clients.id AND n.enabled = true), 0)) > 0").Find(&resetClients).Error
+		Where("enable = true AND delay_start = true AND auto_reset = true AND (" + clientTrafficSQL + ") > 0").Find(&resetClients).Error
 	if err != nil {
 		return nil, err
 	}
@@ -693,29 +699,31 @@ func (s *ClientService) ResetNodeClientTraffic(ids []uint) error {
 	}
 	db := database.GetDB()
 	now := time.Now().Unix()
+	var clients []model.Client
 	err := db.Transaction(func(tx *gorm.DB) error {
-		var clients []model.Client
-		if err := tx.Where("id in ?", ids).Find(&clients).Error; err != nil {
+		if err := tx.Select("id", "name").Where("id in ?", ids).Find(&clients).Error; err != nil {
 			return err
 		}
-		for _, client := range clients {
-			if err := tx.Model(&model.Client{}).Where("id = ?", client.Id).Updates(map[string]interface{}{
-				"total_up":   gorm.Expr("total_up + up"),
-				"total_down": gorm.Expr("total_down + down"),
-				"up":         0,
-				"down":       0,
-			}).Error; err != nil {
-				return err
-			}
-			if err := tx.Create(&model.Changes{
-				DateTime: now, Actor: "NodeSync", Key: "clients", Action: "reset", Obj: clientNameJSON(client.Name),
-			}).Error; err != nil {
-				return err
-			}
+		if len(clients) == 0 {
+			return nil
 		}
-		return nil
+		if err := tx.Model(&model.Client{}).Where("id in ?", ids).UpdateColumns(map[string]interface{}{
+			"total_up":   gorm.Expr("total_up + up"),
+			"total_down": gorm.Expr("total_down + down"),
+			"up":         0,
+			"down":       0,
+		}).Error; err != nil {
+			return err
+		}
+		changes := make([]model.Changes, 0, len(clients))
+		for _, client := range clients {
+			changes = append(changes, model.Changes{
+				DateTime: now, Actor: "NodeSync", Key: "clients", Action: "reset", Obj: clientNameJSON(client.Name),
+			})
+		}
+		return tx.Create(&changes).Error
 	})
-	if err == nil {
+	if err == nil && len(clients) > 0 {
 		LastUpdate = now
 	}
 	return err
@@ -728,16 +736,26 @@ func (s *ClientService) ApplyNodeQuotas(quotas []NodeQuota) ([]uint, error) {
 		return nil, nil
 	}
 	db := database.GetDB()
+	ids := make([]uint, 0, len(quotas))
+	for _, quota := range quotas {
+		ids = append(ids, quota.Id)
+	}
+	now := time.Now().Unix()
 	var inboundIDs []uint
 	var changes []model.Changes
 	err := db.Transaction(func(tx *gorm.DB) error {
+		var clients []model.Client
+		if err := tx.Select("id", "name", "enable", "inbounds").Where("id in ?", ids).Find(&clients).Error; err != nil {
+			return err
+		}
+		byID := make(map[uint]model.Client, len(clients))
+		for _, client := range clients {
+			byID[client.Id] = client
+		}
 		for _, quota := range quotas {
-			var client model.Client
-			if err := tx.Select("id", "name", "enable", "inbounds").Where("id = ?", quota.Id).First(&client).Error; err != nil {
-				if err == gorm.ErrRecordNotFound {
-					continue
-				}
-				return err
+			client, exists := byID[quota.Id]
+			if !exists {
+				continue
 			}
 			updates := map[string]interface{}{"volume": quota.Volume, "expiry": quota.Expiry}
 			if client.Enable != quota.Enable {
@@ -747,7 +765,7 @@ func (s *ClientService) ApplyNodeQuotas(quotas []NodeQuota) ([]uint, error) {
 					action = "enable"
 				}
 				changes = append(changes, model.Changes{
-					DateTime: time.Now().Unix(), Actor: "NodeSync", Key: "clients",
+					DateTime: now, Actor: "NodeSync", Key: "clients",
 					Action: action, Obj: clientNameJSON(client.Name),
 				})
 				var ids []uint
@@ -771,7 +789,7 @@ func (s *ClientService) ApplyNodeQuotas(quotas []NodeQuota) ([]uint, error) {
 		return nil, err
 	}
 	if len(changes) > 0 {
-		LastUpdate = time.Now().Unix()
+		LastUpdate = now
 	}
 	return inboundIDs, nil
 }

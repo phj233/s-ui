@@ -396,11 +396,7 @@ func (a *ApiService) ProbeNode(c *gin.Context) {
 }
 
 func (a *ApiService) SyncNodes(c *gin.Context) {
-	if err := a.NodeService.SyncAll(); err != nil {
-		jsonMsg(c, "syncNodes", err)
-		return
-	}
-	jsonMsg(c, "syncNodes", nil)
+	jsonMsg(c, "syncNodes", a.NodeService.SyncAll())
 }
 
 func (a *ApiService) GetNodeClients(c *gin.Context) {

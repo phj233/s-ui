@@ -263,11 +263,21 @@ To run backend (from root folder of repository):
 
 ### Multi-Node Management
 
-The panel host is always a local node. To add another region, install a compatible S-UI version on that server, create an API token there, then open **Multi-Region Nodes** in the central panel. Add the remote panel URL and token, test the connection, and choose the remote inbounds that should receive centrally managed clients.
+The panel host is always a local node. To add another region, install a compatible
+S-UI version on that server and create an API token there. In the central panel,
+open **Multi-Region Nodes**, add the remote panel URL and token, test the
+connection, and choose the inbounds that should receive managed clients.
 
-Enabled remote nodes receive centrally managed clients and are included in their subscriptions. A same-name client already on a remote panel is adopted and updated with the central credentials and selected inbounds; remote clients with other names are left alone. Removing a node first disables users managed by the central panel and leaves those accounts on the remote server.
+Enabled remote nodes receive managed clients and appear in the central panel's
+user subscriptions.
+A same-name client already on a remote panel is adopted and updated with the
+central credentials and selected inbounds. Other remote clients are left alone.
+Removing a node first disables clients managed by the central panel and leaves
+those accounts on the remote server.
 
-Traffic usage is summed across enabled nodes. The central panel reconciles shared quotas every 10 seconds, so a node outage or reporting delay can allow brief quota overage.
+Traffic usage is summed across enabled nodes. The central panel reconciles shared
+quotas every 10 seconds, so a node outage or reporting delay can allow brief
+quota overage.
 
 ## Environment Variables
 

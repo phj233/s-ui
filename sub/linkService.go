@@ -30,19 +30,12 @@ func (s *LinkService) appendNodeSubscriptions(client *model.Client) error {
 	if len(urls) == 0 {
 		return nil
 	}
-	links := []Link{}
-	if len(client.Links) > 0 {
-		if err := json.Unmarshal(client.Links, &links); err != nil {
-			return err
-		}
-	}
+	var links []Link
+	_ = json.Unmarshal(client.Links, &links)
 	for _, uri := range urls {
 		links = append(links, Link{Type: "sub", Uri: uri})
 	}
-	encoded, err := json.Marshal(links)
-	if err != nil {
-		return err
-	}
+	encoded, _ := json.Marshal(links)
 	client.Links = encoded
 	return nil
 }
