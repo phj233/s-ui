@@ -40,8 +40,9 @@ func (c *CronJob) Start(loc *time.Location, trafficAge int, statsBucketSeconds i
 
 	// Start stats job
 	addJob("@every 10s", NewStatsJob(trafficAge > 0, statsBucketSeconds), "stats job")
-	// Start expiry job
-	addJob("@every 1m", NewDepleteJob(), "deplete job")
+	// Reconcile client expiry and shared multi-node quotas with each node's
+	// latest ten-second traffic snapshot.
+	addJob("@every 10s", NewDepleteJob(), "deplete and node quota job")
 	// Periodic global traffic reset. Polled rather than scheduled on the spec
 	// itself: the spec was read once at start, so a saved change did nothing
 	// until the panel was restarted.
