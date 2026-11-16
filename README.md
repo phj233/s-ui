@@ -263,6 +263,12 @@ To run backend (from root folder of repository):
 
 ### Multi-Node Management
 
+Multi-node management is **optional and off by default**. Nothing below runs until
+**Settings → Multi-Region Nodes** is switched on: while it is off, no node page is
+shown, no cron job contacts a remote panel, and client usage and quota checks use
+the same local-only counters as before. Turning it on adds two empty tables
+(`nodes`, `node_clients`) and starts a ten-second reconciliation job.
+
 The panel host is always a local node. To add another region, install a compatible
 S-UI version on that server and create an API token there. In the central panel,
 open **Multi-Region Nodes**, add the remote panel URL and token, test the

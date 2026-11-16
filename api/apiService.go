@@ -120,6 +120,9 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		data["services"] = services
 		data["subURI"] = subURI
 		data["enableTraffic"] = trafficAge > 0
+		// The panel only shows the multi-region node page while the feature is
+		// on, so the switch travels with the load rather than as a setting.
+		data["nodesEnabled"] = service.NodesEnabled()
 		data["onlines"] = onlines
 		data["os"] = runtime.GOOS
 	} else {

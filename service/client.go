@@ -17,11 +17,27 @@ import (
 
 type ClientService struct{}
 
+// remoteTrafficSQL folds in the usage that enabled nodes reported. It joins two
+// tables a default install never populates, so it is only ever concatenated
+// into a query when multi-region nodes are on.
 const remoteTrafficSQL = "COALESCE((SELECT SUM(nc.up + nc.down) FROM node_clients nc " +
 	"JOIN nodes n ON n.id = nc.node_id WHERE nc.client_id = clients.id AND n.enabled = true), 0)"
-const clientTrafficSQL = "up + down + " + remoteTrafficSQL
-const depletedClientsSQL = "enable = true AND ((volume > 0 AND " + clientTrafficSQL +
-	" > volume) OR (expiry > 0 AND expiry < ?))"
+
+// clientTrafficSQL is a client's total usage. With multi-region nodes off it is
+// the local counters alone -- the exact expression this package used before the
+// feature existed -- so an install that never enables nodes keeps both the old
+// plan and the old behaviour.
+func clientTrafficSQL() string {
+	if !NodesEnabled() {
+		return "up + down"
+	}
+	return "up + down + " + remoteTrafficSQL
+}
+
+func depletedClientsSQL() string {
+	return "enable = true AND ((volume > 0 AND " + clientTrafficSQL() +
+		" > volume) OR (expiry > 0 AND expiry < ?))"
+}
 
 func (s *ClientService) Get(id string) (*[]model.Client, error) {
 	if id == "" {
@@ -516,7 +532,7 @@ func (s *ClientService) DepleteClients() ([]uint, error) {
 	}
 
 	// Deplete clients
-	err = tx.Model(model.Client{}).Where(depletedClientsSQL, dt).Scan(&clients).Error
+	err = tx.Model(model.Client{}).Where(depletedClientsSQL(), dt).Scan(&clients).Error
 	if err != nil {
 		return nil, err
 	}
@@ -539,7 +555,7 @@ func (s *ClientService) DepleteClients() ([]uint, error) {
 
 	// Save changes
 	if len(changes) > 0 {
-		err = tx.Model(model.Client{}).Where(depletedClientsSQL, dt).Update("enable", false).Error
+		err = tx.Model(model.Client{}).Where(depletedClientsSQL(), dt).Update("enable", false).Error
 		if err != nil {
 			return nil, err
 		}
@@ -560,7 +576,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 	var inboundIds []uint
 	// Set delay start without periodic reset
 	err = tx.Model(model.Client{}).
-		Where("enable = true AND delay_start = true AND auto_reset = false AND (" + clientTrafficSQL + ") > 0").Find(&resetClients).Error
+		Where("enable = true AND delay_start = true AND auto_reset = false AND (" + clientTrafficSQL() + ") > 0").Find(&resetClients).Error
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +595,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 
 	// Set delay start with periodic reset
 	err = tx.Model(model.Client{}).
-		Where("enable = true AND delay_start = true AND auto_reset = true AND (" + clientTrafficSQL + ") > 0").Find(&resetClients).Error
+		Where("enable = true AND delay_start = true AND auto_reset = true AND (" + clientTrafficSQL() + ") > 0").Find(&resetClients).Error
 	if err != nil {
 		return nil, err
 	}

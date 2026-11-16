@@ -42,6 +42,12 @@ func (a *APP) Init() error {
 	// Init Setting
 	a.SettingService.GetAllSetting()
 
+	// Prime the multi-region node switch before the cron jobs and the web
+	// server start asking for it.
+	if err = a.SettingService.LoadNodesEnabled(); err != nil {
+		log.Printf("load nodes setting failed: %v", err)
+	}
+
 	a.core = core.NewCore()
 
 	a.cronJob = cronjob.NewCronJob()

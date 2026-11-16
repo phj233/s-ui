@@ -288,6 +288,9 @@ func callNodeAPI(baseURL, token, method, action string, form url.Values, target 
 // RemoteSubscriptionURLs returns subscription links for nodes hosting a client.
 // Unavailable nodes are skipped so healthy nodes remain in the subscription.
 func (s *NodeService) RemoteSubscriptionURLs(clientID uint, clientName string) ([]string, error) {
+	if !NodesEnabled() {
+		return nil, nil
+	}
 	var nodes []model.Node
 	db := database.GetDB()
 	mappedNodes := db.Model(&model.NodeClient{}).Select("node_id").Where("client_id = ?", clientID)
@@ -321,6 +324,9 @@ func (s *NodeService) RemoteSubscriptionURLs(clientID uint, clientName string) (
 
 // SyncAllClients mirrors local clients to enabled nodes and disables managed clients on disabled nodes.
 func (s *NodeService) SyncAllClients() error {
+	if !NodesEnabled() {
+		return nil
+	}
 	var nodes []model.Node
 	if err := database.GetDB().Order("id").Find(&nodes).Error; err != nil {
 		return err
@@ -643,6 +649,9 @@ func loadNodeUsage(clientID *uint) ([]nodeUsage, error) {
 // local counters returned by the admin API. The database's local counters stay
 // separate so periodic resets and quota enforcement remain well-defined.
 func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) error {
+	if !NodesEnabled() {
+		return nil
+	}
 	if len(*clients) == 0 {
 		return nil
 	}
@@ -664,6 +673,9 @@ func (s *NodeService) AggregateRemoteUsage(clients *[]model.Client) error {
 
 // AggregateClientUsage adds remote traffic to a subscription's client counters.
 func (s *NodeService) AggregateClientUsage(client *model.Client) error {
+	if !NodesEnabled() {
+		return nil
+	}
 	usages, err := loadNodeUsage(&client.Id)
 	if err != nil {
 		return err
@@ -677,6 +689,9 @@ func (s *NodeService) AggregateClientUsage(client *model.Client) error {
 // RefreshRemoteUsage polls each registered S-UI node, updates its managed user
 // counters, and carries central periodic resets over to that node.
 func (s *NodeService) RefreshRemoteUsage() error {
+	if !NodesEnabled() {
+		return nil
+	}
 	var nodes []model.Node
 	if err := database.GetDB().Where("enabled = ?", true).Order("id").Find(&nodes).Error; err != nil {
 		return err
@@ -792,6 +807,9 @@ func (s *NodeService) recordNodeUsage(mappings []model.NodeClient, remoteByID, l
 
 // ResetAllManagedTraffic applies a central global reset to managed remote clients.
 func (s *NodeService) ResetAllManagedTraffic() error {
+	if !NodesEnabled() {
+		return nil
+	}
 	var nodes []model.Node
 	if err := database.GetDB().Where("enabled = ?", true).Order("id").Find(&nodes).Error; err != nil {
 		return err
@@ -844,6 +862,9 @@ func (s *NodeService) ResetAllManagedTraffic() error {
 // usage already recorded on that node. A ten-second reconciler keeps all nodes
 // drawing from the same allowance, with a short reporting-window overshoot.
 func (s *NodeService) SyncSharedQuotas() error {
+	if !NodesEnabled() {
+		return nil
+	}
 	var nodes []model.Node
 	if err := database.GetDB().Where("enabled = ?", true).Order("id").Find(&nodes).Error; err != nil {
 		return err

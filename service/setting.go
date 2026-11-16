@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/alireza0/s-ui/config"
@@ -97,6 +98,7 @@ var defaultValueMap = map[string]string{
 	"subClashSprtAll":    "false",
 	"subClashUdp":        "false",
 	"maintenance":        "false",
+	"nodesEnabled":       "false",
 	"globalReset":        "",
 	"globalResetLast":    "0",
 	"config":             defaultConfig,
@@ -181,16 +183,29 @@ func (s *SettingService) saveSetting(key string, value string) error {
 	setting, err := s.getSetting(key)
 	db := database.GetDB()
 	if database.IsNotFound(err) {
-		return db.Create(&model.Setting{
+		if err = db.Create(&model.Setting{
 			Key:   key,
 			Value: value,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
 	} else if err != nil {
 		return err
+	} else {
+		setting.Key = key
+		setting.Value = value
+		if err = db.Save(setting).Error; err != nil {
+			return err
+		}
 	}
-	setting.Key = key
-	setting.Value = value
-	return db.Save(setting).Error
+	// Writing the switch is the only way it changes, so the cache is refreshed
+	// here rather than on a timer.
+	if key == "nodesEnabled" {
+		if enabled, parseErr := strconv.ParseBool(value); parseErr == nil {
+			nodesEnabled.Store(enabled)
+		}
+	}
+	return nil
 }
 
 func (s *SettingService) setString(key string, value string) error {
@@ -586,6 +601,36 @@ func (s *SettingService) GetMaintenance() (bool, error) {
 
 func (s *SettingService) SetMaintenance(enabled bool) error {
 	return s.setString("maintenance", strconv.FormatBool(enabled))
+}
+
+// nodesEnabled caches the multi-region node switch. It is read on every
+// client-list and subscription request, and on SQL that runs per client row,
+// where a settings query each time would be a cost paid by installs that never
+// turn the feature on. Zero means "off", so the package default is the safe
+// answer even before the setting has been read.
+var nodesEnabled atomic.Bool
+
+// GetNodesEnabled reads the switch from the database.
+func (s *SettingService) GetNodesEnabled() (bool, error) {
+	return s.getBool("nodesEnabled")
+}
+
+// LoadNodesEnabled refreshes the cache. Called once at startup, and again
+// indirectly through saveSetting whenever the panel writes the switch.
+func (s *SettingService) LoadNodesEnabled() error {
+	enabled, err := s.GetNodesEnabled()
+	if err != nil {
+		return err
+	}
+	nodesEnabled.Store(enabled)
+	return nil
+}
+
+// NodesEnabled reports whether multi-region nodes are turned on. It answers
+// from memory, so callers on the hot path can gate without touching the
+// database. Off is the default and the state of every existing install.
+func NodesEnabled() bool {
+	return nodesEnabled.Load()
 }
 
 func (s *SettingService) fileExists(path string) error {
