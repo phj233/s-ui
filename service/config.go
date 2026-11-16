@@ -395,6 +395,15 @@ func (s *ConfigService) Save(obj string, act string, data json.RawMessage, initU
 			logger.Error("failed to commit config save: ", cErr)
 			return
 		}
+		// The panel writes settings through this transaction rather than
+		// through saveSetting, so the cached switch has to be refreshed here --
+		// after the commit, so a rollback cannot leave it holding a value that
+		// was never stored.
+		if obj == "settings" {
+			if sErr := s.SettingService.LoadNodesEnabled(); sErr != nil {
+				logger.Warning("refresh nodes setting failed: ", sErr)
+			}
+		}
 		if restartWith != nil {
 			// Detached: a restart takes seconds and this is an HTTP handler.
 			// The recover is required -- a panic here is outside gin's reach.
