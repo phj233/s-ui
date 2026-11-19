@@ -1,0 +1,190 @@
+name: Sync upstream
+
+# Keeps the fork's feature branch current with alireza0/s-ui.
+#
+# Upstream is not going to take the multi-region node work, so this fork has to
+# absorb upstream by merging on a schedule instead of by hand. The merge itself
+# lives in .github/scripts/sync-upstream.sh; this file only orders the steps
+# around it.
+#
+# Nothing is pushed until both sides compile: a run that merges something
+# broken leaves the branches exactly as they were.
+
+on:
+  schedule:
+    # 03:00 Asia/Singapore. GitHub's cron is UTC, and it drops runs when the
+    # queue is busy, so treat this as "usually nightly" rather than a promise.
+    - cron: '0 19 * * *'
+  workflow_dispatch:
+
+# Two syncs at once would race on the same two branches.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  FEATURE_BRANCH: feature/multi-region-nodes
+  SUBMODULE_BRANCH: feature/multi-region-nodes
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the sync token is configured
+        env:
+          TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          # GITHUB_TOKEN can only write to this repository, so it cannot push
+          # the submodule branch. SYNC_TOKEN is a PAT that covers both.
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::secret SYNC_TOKEN is missing: it must be a token that can write to phj233/s-ui and phj233/s-ui-frontend"
+            exit 1
+          fi
+
+      - name: Checkout the feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FEATURE_BRANCH }}
+          fetch-depth: 0
+          submodules: false
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Authenticate every github.com remote with the token
+        env:
+          TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          # One rewrite covers the submodule clone and both pushes. The token is
+          # masked in the log by Actions.
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Checkout the frontend submodule on its branch
+        run: |
+          # .gitmodules names the upstream frontend repository, which does not
+          # have this fork's commits, so the clone URL is overridden here.
+          git -c submodule.frontend.url=https://github.com/phj233/s-ui-frontend.git \
+              submodule update --init
+          git -C frontend fetch origin "${SUBMODULE_BRANCH}"
+          git -C frontend checkout -B "${SUBMODULE_BRANCH}" "origin/${SUBMODULE_BRANCH}"
+
+      - name: Configure the commit identity
+        run: |
+          for repo in . frontend; do
+            git -C "${repo}" config user.name "upstream sync bot"
+            git -C "${repo}" config user.email "phj233@users.noreply.github.com"
+          done
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/alireza0/s-ui.git
+          git fetch --no-tags upstream main
+          git -C frontend remote add upstream https://github.com/alireza0/s-ui-frontend.git
+          git -C frontend fetch --no-tags upstream main
+
+      - name: Merge upstream
+        id: merge
+        run: bash .github/scripts/sync-upstream.sh
+
+      - name: Set up Go
+        if: steps.merge.outputs.changed == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the panel
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          # cgo stays off: this only has to prove the merged tree still
+          # compiles, and the cgo sqlite build is slow enough to matter here.
+          CGO_ENABLED=0 go build ./...
+
+      - name: Set up Node
+        if: steps.merge.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build the frontend
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Push both branches
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          # Submodule first: the superproject records its commit, so a clone
+          # that lands between the two pushes can still resolve the gitlink.
+          git -C frontend push origin "HEAD:${SUBMODULE_BRANCH}"
+          git push origin "HEAD:${FEATURE_BRANCH}"
+
+      - name: Open or update the failure issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'Upstream sync failed';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              'The scheduled upstream merge did not finish, so nothing was pushed.',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'A conflict outside the frontend gitlink means upstream changed code this fork also owns and the merge needs a human decision.',
+            ].join('\n');
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = open.find((issue) => issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
+
+      - name: Close the failure issue
+        if: success() && steps.merge.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = open.find((issue) => issue.title === 'Upstream sync failed');
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: 'A later run merged upstream cleanly; closing.',
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'closed',
+              });
+            }
