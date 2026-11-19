@@ -86,7 +86,12 @@ jobs:
 
       - name: Merge upstream
         id: merge
-        run: bash .github/scripts/sync-upstream.sh
+        run: |
+          # The job works on the feature branch, which does not carry this
+          # tooling: it lives on main, next to this workflow, so it is read from
+          # the default branch instead of from the checkout.
+          git show origin/main:.github/scripts/sync-upstream.sh > "${RUNNER_TEMP}/sync-upstream.sh"
+          bash "${RUNNER_TEMP}/sync-upstream.sh"
 
       - name: Set up Go
         if: steps.merge.outputs.changed == 'true'
